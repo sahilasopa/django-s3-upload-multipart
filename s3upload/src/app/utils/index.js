@@ -33,6 +33,33 @@ export const request = function(method, url, data, headers, onProgress, onLoad, 
     request.send(data);
 }
 
+/**
+ * PUT request with blob body (for S3 upload part). Returns the XHR so caller can abort.
+ */
+export const putRequest = function(url, blob, onProgress, onLoad, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+
+    xhr.onload = function() {
+        onLoad(xhr.status, xhr.responseText, xhr);
+    };
+
+    if (onError) {
+        xhr.onerror = xhr.onabort = function() {
+            onError(xhr.status, xhr.responseText);
+        };
+    }
+
+    if (onProgress) {
+        xhr.upload.onprogress = function(data) {
+            onProgress(data);
+        };
+    }
+
+    xhr.send(blob);
+    return xhr;
+}
+
 export const parseURL = function(text) {
     var xml = new DOMParser().parseFromString(text, 'text/xml'),
         tag = xml.getElementsByTagName('Location')[0],

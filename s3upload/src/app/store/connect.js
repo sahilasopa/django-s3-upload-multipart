@@ -23,3 +23,16 @@ export function getElement (store) {
 export function getAWSPayload (store) {
     return store.getState().AWSUploadParams.AWSPayload;
 }
+
+export function getMultipartState (store) {
+    const appStatus = store.getState().appStatus;
+    return {
+        uploadId: appStatus.uploadId,
+        key: appStatus.key,
+        partSize: appStatus.partSize,
+        totalParts: appStatus.totalParts,
+        completedParts: appStatus.completedParts || {},
+        isPaused: appStatus.isPaused,
+        isMultipartUpload: appStatus.isMultipartUpload
+    };
+}

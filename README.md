@@ -1,10 +1,12 @@
 # django-s3-upload
 
+**Credits.** This project extends [yunojuno/django-s3-upload](https://github.com/yunojuno/django-s3-upload) with multipart uploads, pause/resume, and related features. Thanks to the original authors and maintainers.
+
 ## Compatibility
 
 This library supports Python 3.12+ and Django 5.2-6.0.
 
-[![Build Status](https://travis-ci.org/yunojuno/django-s3upload.svg?branch=master)](https://travis-ci.org/yunojuno/django-s3upload)
+[![Build Status](https://travis-ci.org/sahilasopa/django-s3upload-multipart.svg?branch=master)](https://travis-ci.org/sahilasopa/django-s3upload-multipart)
 
 **Allows direct uploading of a file from the browser to AWS S3 via a file input field rendered by
 Django.**
@@ -17,6 +19,7 @@ to S3.
 Features include:
 
 -   displaying a progress bar
+-   multipart uploads for large files (default threshold 5 MB) with pause and resume
 -   support for ACLs (eg, private uploads)
 -   support for encrypted-at-rest S3 buckets
 -   mimetype and file extension whitelisting
@@ -152,7 +155,23 @@ S3UPLOAD_DESTINATIONS = {
         'server_side_encryption': 'AES256', # Default no encryption
     }
 }
+
+# [Optional] Multipart uploads: files larger than this size (default 5 MB) use S3
+# multipart upload with pause/resume. Part size must be at least 5 MB per S3 rules.
+# S3UPLOAD_MULTIPART_CHUNK_SIZE = 5 * 1024 * 1024
 ```
+
+### Multipart uploads
+
+For files larger than the chunk size (default **5 MB**), the widget uses S3’s multipart upload API instead of a single presigned POST. This avoids timeouts on large files and supports **pause** and **resume** in the same browser session.
+
+- **When it’s used:** Any file larger than `S3UPLOAD_MULTIPART_CHUNK_SIZE` (default 5 MB) is uploaded in chunks. Smaller files still use the normal presigned POST flow.
+- **Chunk size:** Default is 5 MB (`5 * 1024 * 1024`). S3 requires at least 5 MB per part (except the last). Set `S3UPLOAD_MULTIPART_CHUNK_SIZE` in settings to override.
+- **Pause / Resume:** During a multipart upload, the widget shows Pause and Resume. Pausing stops sending new parts; resuming continues from the next part. State is in-memory only (resume is lost on page refresh).
+- **CORS:** Your S3 bucket CORS must allow `PUT` (see AWS Setup above) so the browser can upload parts directly to S3.
+- **URLs:** Include `s3upload.urls` as usual; multipart uses the same destination and auth as `get_upload_params` (initiate, sign part, complete, and abort are under the same path prefix).
+
+No extra configuration is required for multipart; the same destinations and permissions apply. To disable multipart and always use presigned POST, set `S3UPLOAD_MULTIPART_CHUNK_SIZE` to a value larger than your maximum file size.
 
 ### urls.py
 
@@ -222,7 +241,7 @@ class MyView(FormView):
 Examples of both approaches can be found in the examples folder. To run them:
 
 ```shell
-$ git clone git@github.com:yunojuno/django-s3-upload.git
+$ git clone git@github.com:sahilasopa/django-s3-upload-multipart.git
 $ cd django-s3-upload
 
 # Add your AWS keys to your environment

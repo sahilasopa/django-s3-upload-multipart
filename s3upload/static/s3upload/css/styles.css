@@ -3,17 +3,12 @@
   color: red;
 }
 
-.s3upload .s3upload__progress {
-  background: #333;
-  width: 200px;
-}
-
 .s3upload .s3upload__file-remove {
   margin-top: 10px;
   text-transform: uppercase;
 }
 
-.s3upload .s3upload__progress,
+.s3upload .s3upload__progress-row,
 .s3upload .s3upload__file-link,
 .s3upload .s3upload__file-remove,
 .s3upload .s3upload__file-input,
@@ -22,10 +17,83 @@
   display: none;
 }
 
-.s3upload.progress-active .s3upload__progress,
+.s3upload.progress-active .s3upload__progress-row,
 .s3upload.link-active .s3upload__file-link,
 .s3upload.link-active .s3upload__file-remove,
 .s3upload.form-active .s3upload__file-input,
 .s3upload.has-error .s3upload__error {
   display: block;
+}
+
+/* Progress row: bar on the left, icon controls on the right */
+.s3upload__progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.s3upload__progress-row .s3upload__progress {
+  flex: 1;
+  min-width: 0;
+}
+
+.s3upload__progress {
+  background: #333;
+  width: 200px;
+}
+
+/* Minimal icon buttons (pause, resume, cancel) – right of progress */
+.s3upload__multipart-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.s3upload__icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #666;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.s3upload__icon-btn:hover {
+  color: #333;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.s3upload__icon-btn:active {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.s3upload__icon-btn .s3upload__icon {
+  display: block;
+}
+
+.s3upload__cancel.s3upload__icon-btn:hover {
+  color: #b71c1c;
+  background: rgba(183, 28, 28, 0.08);
+}
+
+/* Touch-friendly on small screens */
+@media (max-width: 480px) {
+  .s3upload__icon-btn {
+    min-width: 44px;
+    min-height: 44px;
+    width: 44px;
+    height: 44px;
+  }
+  .s3upload__icon-btn .s3upload__icon {
+    width: 22px;
+    height: 22px;
+  }
 }

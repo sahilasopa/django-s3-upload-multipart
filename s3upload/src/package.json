@@ -9,8 +9,8 @@
     "uglify": "uglifyjs ../static/s3upload/js/django-s3-uploads.js -m -c -o ../static/s3upload/js/django-s3-uploads.min.js",
     "build": "NODE_ENV=production npm run transpile && npm run uglify"
   },
-  "author": "YunoJuno",
-  "email": "code@yunojuno.com",
+  "author": "Sahil Asopa",
+  "email": "hello@zerobuffer.io",
   "license": "MIT",
   "devDependencies": {
     "babel-cli": "^6.24.1",

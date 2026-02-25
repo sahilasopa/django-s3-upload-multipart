@@ -4,7 +4,8 @@
 Object.defineProperty(exports, "__esModule", {
     value: true
 });
-exports.updateProgress = exports.clearErrors = exports.addError = exports.didNotCompleteUploadToAWS = exports.completeUploadToAWS = exports.beginUploadToAWS = exports.removeUpload = exports.didNotReceivAWSUploadParams = exports.receiveSignedURL = exports.receiveAWSUploadParams = exports.getUploadURL = undefined;
+exports.updateProgress = exports.clearErrors = exports.addError = exports.didNotCompleteUploadToAWS = exports.completeUploadToAWS = exports.beginUploadToAWS = exports.removeUpload = exports.didNotReceivAWSUploadParams = exports.receiveSignedURL = exports.receiveAWSUploadParams = exports.multipartError = exports.multipartAborted = exports.multipartCompleted = exports.multipartResumed = exports.multipartPaused = exports.partCompleted = exports.multipartInitiated = exports.initiateMultipart = exports.getUploadURL = undefined;
+exports.abortMultipartAndRemove = abortMultipartAndRemove;
 
 var _constants = require('../constants');
 
@@ -16,7 +17,18 @@ var _store = require('../store');
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-var getUploadURL = exports.getUploadURL = function getUploadURL(file, dest, url, store) {
+var MULTIPART_CHUNK_SIZE = 5 * 1024 * 1024;
+
+function getMultipartBaseUrl(policyUrl) {
+    return policyUrl.replace(/get_upload_params\/?$/, '');
+}
+
+var getUploadURL = exports.getUploadURL = function getUploadURL(file, dest, url, store, xhrRef, resumeRef) {
+
+    if (file.size > MULTIPART_CHUNK_SIZE) {
+        store.dispatch(initiateMultipart(file, dest, url, store, xhrRef, resumeRef));
+        return { type: _constants2.default.INITIATE_MULTIPART };
+    }
 
     var form = new FormData(),
         headers = { 'X-CSRFToken': (0, _utils.getCookie)('csrftoken') };
@@ -65,6 +77,218 @@ var getUploadURL = exports.getUploadURL = function getUploadURL(file, dest, url,
         type: _constants2.default.REQUEST_AWS_UPLOAD_PARAMS
     };
 };
+
+var initiateMultipart = exports.initiateMultipart = function initiateMultipart(file, dest, policyUrl, store, xhrRef, resumeRef) {
+    var baseUrl = getMultipartBaseUrl(policyUrl);
+    var initiateUrl = baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '') + 'initiate_multipart/';
+    var form = new FormData();
+    form.append('type', file.type);
+    form.append('name', file.name);
+    form.append('dest', dest);
+    form.append('file_size', String(file.size));
+    var headers = { 'X-CSRFToken': (0, _utils.getCookie)('csrftoken') };
+
+    var onLoad = function onLoad(status, json) {
+        var data = (0, _utils.parseJson)(json);
+        if (status !== 200) {
+            store.dispatch(addError(data && data.error ? data.error : _constants.i18n_strings.no_multipart_init_failed));
+            store.dispatch(multipartError());
+            (0, _utils.raiseEvent)((0, _store.getElement)(store), 's3upload:error', { status: status, error: data });
+            return;
+        }
+        store.dispatch(multipartInitiated(data));
+        runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef);
+    };
+    var onError = function onError(status, json) {
+        store.dispatch(addError(_constants.i18n_strings.no_multipart_init_failed));
+        store.dispatch(multipartError());
+        (0, _utils.raiseEvent)((0, _store.getElement)(store), 's3upload:error', { status: status, error: (0, _utils.parseJson)(json) });
+    };
+    (0, _utils.request)('POST', initiateUrl, form, headers, false, onLoad, onError);
+    return { type: _constants2.default.INITIATE_MULTIPART };
+};
+
+var multipartInitiated = exports.multipartInitiated = function multipartInitiated(data) {
+    return {
+        type: _constants2.default.MULTIPART_INITIATED,
+        uploadId: data.upload_id,
+        key: data.key,
+        bucket: data.bucket,
+        bucket_endpoint: data.bucket_endpoint,
+        partSize: data.part_size,
+        totalParts: data.total_parts
+    };
+};
+
+function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
+    var presignUrl = baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '') + 'presign_part_url/';
+    var completeUrl = baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '') + 'complete_multipart/';
+    var headers = { 'X-CSRFToken': (0, _utils.getCookie)('csrftoken') };
+
+    function doPart(partNumber) {
+        var state = (0, _store.getMultipartState)(store);
+        if (partNumber > state.totalParts) {
+            return sendComplete(store, completeUrl, headers, file.name);
+        }
+        if (state.isPaused) return;
+        if (state.completedParts[partNumber]) return doPart(partNumber + 1);
+
+        var form = new FormData();
+        form.append('upload_id', state.uploadId);
+        form.append('key', state.key);
+        form.append('part_number', String(partNumber));
+
+        (0, _utils.request)('POST', presignUrl, form, headers, false, function (status, json) {
+            if (status !== 200) {
+                store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                store.dispatch(multipartError());
+                return;
+            }
+            var data = (0, _utils.parseJson)(json);
+            var putUrl = data && data.url;
+            if (!putUrl) {
+                store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                store.dispatch(multipartError());
+                return;
+            }
+            var start = (partNumber - 1) * state.partSize;
+            var end = partNumber * state.partSize;
+            if (end > file.size) end = file.size;
+            var chunk = file.slice(start, end);
+
+            var xhr = (0, _utils.putRequest)(putUrl, chunk, function (progressData) {
+                if (progressData.lengthComputable) {
+                    var partProgress = Math.round(progressData.loaded * 100 / progressData.total);
+                    var completedCount = Object.keys(state.completedParts || {}).length;
+                    var total = state.totalParts;
+                    var progress = Math.round(completedCount / total * 100 + partProgress / total);
+                    store.dispatch(updateProgress(progress));
+                    (0, _utils.raiseEvent)((0, _store.getElement)(store), 's3upload:progress-updated', { progress: progress });
+                }
+            }, function (statusCode, responseText, xhrObj) {
+                if (xhrRef) xhrRef.xhr = null;
+                if (statusCode !== 200) {
+                    store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                    store.dispatch(multipartError());
+                    return;
+                }
+                var etag = xhrObj.getResponseHeader('ETag');
+                if (etag) etag = etag.replace(/^"|"$/g, '');
+                store.dispatch(partCompleted(partNumber, etag || ''));
+                var completed = store.getState().appStatus.completedParts || {};
+                var completedCount = Object.keys(completed).length;
+                store.dispatch(updateProgress(Math.round(completedCount / state.totalParts * 100)));
+                (0, _utils.raiseEvent)((0, _store.getElement)(store), 's3upload:progress-updated', { progress: Math.round(completedCount / state.totalParts * 100) });
+                doPart(partNumber + 1);
+            }, function (statusCode, responseText) {
+                if (xhrRef) {
+                    xhrRef.xhr = null;
+                    if (xhrRef.pausedByUser) {
+                        xhrRef.pausedByUser = false;
+                        return;
+                    }
+                }
+                if (store.getState().appStatus.isPaused) return;
+                store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                store.dispatch(multipartError());
+            });
+            if (xhrRef) xhrRef.xhr = xhr;
+        }, function (status, json) {
+            store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+            store.dispatch(multipartError());
+        });
+    }
+
+    if (resumeRef) resumeRef.resume = function () {
+        doPart(1);
+    };
+    doPart(1);
+}
+
+function sendComplete(store, completeUrl, headers, filename) {
+    var state = (0, _store.getMultipartState)(store);
+    var parts = [];
+    var completedParts = state.completedParts || {};
+    for (var i = 1; i <= state.totalParts; i++) {
+        if (completedParts[i] && completedParts[i].etag) {
+            parts.push({ PartNumber: i, ETag: completedParts[i].etag });
+        }
+    }
+    if (parts.length !== state.totalParts) {
+        store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+        store.dispatch(multipartError());
+        return;
+    }
+    var form = new FormData();
+    form.append('upload_id', state.uploadId);
+    form.append('key', state.key);
+    form.append('parts', JSON.stringify(parts));
+
+    (0, _utils.request)('POST', completeUrl, form, headers, false, function (status, json) {
+        if (status !== 200) {
+            store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+            store.dispatch(multipartError());
+            return;
+        }
+        var data = (0, _utils.parseJson)(json);
+        var url = data && (data.private_access_url || data.url);
+        if (!url) {
+            store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+            store.dispatch(multipartError());
+            return;
+        }
+        store.dispatch(multipartCompleted());
+        store.dispatch(completeUploadToAWS(filename, url));
+        (0, _utils.raiseEvent)((0, _store.getElement)(store), 's3upload:file-uploaded', { filename: filename, url: url });
+    }, function (status, json) {
+        store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+        store.dispatch(multipartError());
+    });
+}
+
+var partCompleted = exports.partCompleted = function partCompleted(partNumber, etag) {
+    return {
+        type: _constants2.default.PART_COMPLETED,
+        partNumber: partNumber,
+        etag: etag
+    };
+};
+
+var multipartPaused = exports.multipartPaused = function multipartPaused() {
+    return { type: _constants2.default.MULTIPART_PAUSED };
+};
+var multipartResumed = exports.multipartResumed = function multipartResumed() {
+    return { type: _constants2.default.MULTIPART_RESUMED };
+};
+
+var multipartCompleted = exports.multipartCompleted = function multipartCompleted() {
+    return { type: _constants2.default.MULTIPART_COMPLETED };
+};
+var multipartAborted = exports.multipartAborted = function multipartAborted() {
+    return { type: _constants2.default.MULTIPART_ABORTED };
+};
+var multipartError = exports.multipartError = function multipartError() {
+    return { type: _constants2.default.MULTIPART_ERROR };
+};
+
+/**
+ * If a multipart upload is in progress, POST to abort_multipart then call onDone.
+ * Otherwise call onDone immediately.
+ */
+function abortMultipartAndRemove(store, policyUrl, onDone) {
+    var state = (0, _store.getMultipartState)(store);
+    if (!state.uploadId || !state.key) {
+        onDone();
+        return;
+    }
+    var baseUrl = getMultipartBaseUrl(policyUrl);
+    var abortUrl = baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '') + 'abort_multipart/';
+    var form = new FormData();
+    form.append('upload_id', state.uploadId);
+    form.append('key', state.key);
+    var headers = { 'X-CSRFToken': (0, _utils.getCookie)('csrftoken') };
+    (0, _utils.request)('POST', abortUrl, form, headers, false, onDone, onDone);
+}
 
 var receiveAWSUploadParams = exports.receiveAWSUploadParams = function receiveAWSUploadParams(aws_payload) {
     return {
@@ -265,19 +489,80 @@ var View = function View(element, store) {
 
         removeUpload: function removeUpload(event) {
             event.preventDefault();
-
-            store.dispatch((0, _actions.updateProgress)());
-            store.dispatch((0, _actions.removeUpload)());
-            (0, _utils.raiseEvent)(this.$element, 's3upload:clear-upload');
+            var self = this;
+            var policyUrl = this.$element.getAttribute('data-policy-url');
+            function clearUpload() {
+                store.dispatch((0, _actions.updateProgress)());
+                store.dispatch((0, _actions.removeUpload)());
+                self.$input.value = '';
+                self.$element.classList.add('form-active');
+                self.$element.classList.remove('link-active');
+                (0, _utils.raiseEvent)(self.$element, 's3upload:clear-upload');
+            }
+            (0, _actions.abortMultipartAndRemove)(store, policyUrl, clearUpload);
         },
 
         getUploadURL: function getUploadURL(event) {
-            var file = this.$input.files[0],
-                dest = this.$dest.value,
+            var file = this.$input.files[0];
+            if (!file) return;
+            var dest = this.$dest.value,
                 url = this.$element.getAttribute('data-policy-url');
 
             store.dispatch((0, _actions.clearErrors)());
-            store.dispatch((0, _actions.getUploadURL)(file, dest, url, store));
+            store.dispatch((0, _actions.getUploadURL)(file, dest, url, store, this.xhrRef, this.resumeRef));
+        },
+
+        pauseUpload: function pauseUpload(event) {
+            event.preventDefault();
+            if (this.xhrRef && this.xhrRef.xhr) {
+                this.xhrRef.pausedByUser = true;
+                this.xhrRef.xhr.abort();
+                this.xhrRef.xhr = null;
+            }
+            store.dispatch((0, _actions.multipartPaused)());
+        },
+
+        resumeUpload: function resumeUpload(event) {
+            event.preventDefault();
+            store.dispatch((0, _actions.multipartResumed)());
+            if (this.resumeRef && typeof this.resumeRef.resume === 'function') {
+                this.resumeRef.resume();
+            }
+        },
+
+        cancelUpload: function cancelUpload(event) {
+            event.preventDefault();
+            if (this.xhrRef && this.xhrRef.xhr) {
+                this.xhrRef.pausedByUser = true;
+                this.xhrRef.xhr.abort();
+                this.xhrRef.xhr = null;
+            }
+            var self = this;
+            var policyUrl = this.$element.getAttribute('data-policy-url');
+            function clearUpload() {
+                store.dispatch((0, _actions.updateProgress)());
+                store.dispatch((0, _actions.removeUpload)());
+                self.$input.value = '';
+                self.$element.classList.add('form-active');
+                self.$element.classList.remove('link-active');
+                (0, _utils.raiseEvent)(self.$element, 's3upload:clear-upload');
+            }
+            (0, _actions.abortMultipartAndRemove)(store, policyUrl, clearUpload);
+        },
+
+        renderMultipartControls: function renderMultipartControls() {
+            var state = (0, _store.getMultipartState)(store);
+            var controls = this.$multipartControls;
+            var pauseBtn = this.$pauseBtn;
+            var resumeBtn = this.$resumeBtn;
+            if (!controls || !pauseBtn || !resumeBtn) return;
+            if (state.isMultipartUpload && store.getState().appStatus.isUploading) {
+                controls.style.display = 'flex';
+                pauseBtn.style.display = state.isPaused ? 'none' : 'inline-flex';
+                resumeBtn.style.display = state.isPaused ? 'inline-flex' : 'none';
+            } else {
+                controls.style.display = 'none';
+            }
         },
 
         init: function init() {
@@ -291,6 +576,12 @@ var View = function View(element, store) {
             this.$link = element.querySelector('.s3upload__file-link');
             this.$error = element.querySelector('.s3upload__error');
             this.$bar = element.querySelector('.s3upload__bar');
+            this.$multipartControls = element.querySelector('.s3upload__multipart-controls');
+            this.$pauseBtn = element.querySelector('.s3upload__pause');
+            this.$resumeBtn = element.querySelector('.s3upload__resume');
+            this.$cancelBtn = element.querySelector('.s3upload__cancel');
+            this.xhrRef = { xhr: null };
+            this.resumeRef = { resume: null };
 
             // set initial DOM states3upload__
             var status = this.$url.value === '' ? 'form' : 'link';
@@ -299,22 +590,23 @@ var View = function View(element, store) {
             // add event listeners
             this.$remove.addEventListener('click', this.removeUpload.bind(this));
             this.$input.addEventListener('change', this.getUploadURL.bind(this));
+            if (this.$pauseBtn) this.$pauseBtn.addEventListener('click', this.pauseUpload.bind(this));
+            if (this.$resumeBtn) this.$resumeBtn.addEventListener('click', this.resumeUpload.bind(this));
+            if (this.$cancelBtn) this.$cancelBtn.addEventListener('click', this.cancelUpload.bind(this));
 
-            // these three observers subscribe to the store, but only trigger their
-            // callbacks when the specific piece of state they observe changes.
-            // this allows for a less naive approach to rendering changes than a
-            // render method subscribed to the whole state.
+            // these observers subscribe to the store
             var filenameObserver = (0, _utils.observeStore)(store, function (state) {
                 return state.appStatus.filename;
             }, this.renderFilename.bind(this));
-
             var errorObserver = (0, _utils.observeStore)(store, function (state) {
                 return state.appStatus.error;
             }, this.renderError.bind(this));
-
             var uploadProgressObserver = (0, _utils.observeStore)(store, function (state) {
                 return state.appStatus.uploadProgress;
             }, this.renderUploadProgress.bind(this));
+            var multipartObserver = (0, _utils.observeStore)(store, function (state) {
+                return state.appStatus.isMultipartUpload && state.appStatus.isUploading ? state.appStatus.isPaused ? 'paused' : 'uploading' : 'hidden';
+            }, this.renderMultipartControls.bind(this));
         }
     };
 };
@@ -338,7 +630,15 @@ exports.default = {
     ADD_ERROR: 'ADD_ERROR',
     CLEAR_ERRORS: 'CLEAR_ERRORS',
     UPDATE_PROGRESS: 'UPDATE_PROGRESS',
-    RECEIVE_SIGNED_URL: 'RECEIVE_SIGNED_URL'
+    RECEIVE_SIGNED_URL: 'RECEIVE_SIGNED_URL',
+    INITIATE_MULTIPART: 'INITIATE_MULTIPART',
+    MULTIPART_INITIATED: 'MULTIPART_INITIATED',
+    PART_COMPLETED: 'PART_COMPLETED',
+    MULTIPART_PAUSED: 'MULTIPART_PAUSED',
+    MULTIPART_RESUMED: 'MULTIPART_RESUMED',
+    MULTIPART_COMPLETED: 'MULTIPART_COMPLETED',
+    MULTIPART_ABORTED: 'MULTIPART_ABORTED',
+    MULTIPART_ERROR: 'MULTIPART_ERROR'
 };
 
 
@@ -351,7 +651,9 @@ try {
         "no_upload_failed": "Sorry, failed to upload file.",
         "no_upload_url": "Sorry, could not get upload URL.",
         "no_file_too_large": "Sorry, the file is too large to be uploaded.",
-        "no_file_too_small": "Sorry, the file is too small to be uploaded."
+        "no_file_too_small": "Sorry, the file is too small to be uploaded.",
+        "no_multipart_init_failed": "Sorry, could not start multipart upload.",
+        "no_multipart_failed": "Sorry, multipart upload failed."
     };
 }
 
@@ -370,6 +672,18 @@ var _constants2 = _interopRequireDefault(_constants);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
+function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
+
+var initialMultipartState = {
+    uploadId: null,
+    key: null,
+    partSize: null,
+    totalParts: null,
+    completedParts: {},
+    isPaused: false,
+    isMultipartUpload: false
+};
+
 exports.default = function () {
     var state = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
     var action = arguments[1];
@@ -385,7 +699,7 @@ exports.default = function () {
                 uploadProgress: 0,
                 filename: action.filename,
                 url: action.url
-            });
+            }, initialMultipartState);
         case _constants2.default.DID_NOT_COMPLETE_UPLOAD_TO_AWS:
             return Object.assign({}, state, {
                 isUploading: false
@@ -394,7 +708,7 @@ exports.default = function () {
             return Object.assign({}, state, {
                 filename: null,
                 url: null
-            });
+            }, initialMultipartState);
         case _constants2.default.ADD_ERROR:
             return Object.assign({}, state, {
                 error: action.error
@@ -413,6 +727,48 @@ exports.default = function () {
                     signedURL: action.signedURL
                 });
             }
+        case _constants2.default.INITIATE_MULTIPART:
+            return Object.assign({}, state, {
+                isUploading: true,
+                isMultipartUpload: true
+            });
+        case _constants2.default.MULTIPART_INITIATED:
+            return Object.assign({}, state, {
+                uploadId: action.uploadId,
+                key: action.key,
+                bucket: action.bucket,
+                bucket_endpoint: action.bucket_endpoint,
+                partSize: action.partSize,
+                totalParts: action.totalParts,
+                completedParts: {},
+                isPaused: false,
+                isMultipartUpload: true
+            });
+        case _constants2.default.PART_COMPLETED:
+            {
+                var completedParts = Object.assign({}, state.completedParts || {}, _defineProperty({}, action.partNumber, { etag: action.etag }));
+                return Object.assign({}, state, {
+                    completedParts: completedParts
+                });
+            }
+        case _constants2.default.MULTIPART_PAUSED:
+            return Object.assign({}, state, {
+                isPaused: true
+            });
+        case _constants2.default.MULTIPART_RESUMED:
+            return Object.assign({}, state, {
+                isPaused: false
+            });
+        case _constants2.default.MULTIPART_COMPLETED:
+            return Object.assign({}, state, {
+                isUploading: false,
+                uploadProgress: 0
+            }, initialMultipartState);
+        case _constants2.default.MULTIPART_ABORTED:
+        case _constants2.default.MULTIPART_ERROR:
+            return Object.assign({}, state, {
+                isUploading: false
+            }, initialMultipartState);
 
         default:
             return state;
@@ -500,6 +856,7 @@ exports.getError = getError;
 exports.getUploadProgress = getUploadProgress;
 exports.getElement = getElement;
 exports.getAWSPayload = getAWSPayload;
+exports.getMultipartState = getMultipartState;
 function getFilename(store) {
     return store.getState().appStatus.filename;
 }
@@ -524,6 +881,19 @@ function getElement(store) {
 
 function getAWSPayload(store) {
     return store.getState().AWSUploadParams.AWSPayload;
+}
+
+function getMultipartState(store) {
+    var appStatus = store.getState().appStatus;
+    return {
+        uploadId: appStatus.uploadId,
+        key: appStatus.key,
+        partSize: appStatus.partSize,
+        totalParts: appStatus.totalParts,
+        completedParts: appStatus.completedParts || {},
+        isPaused: appStatus.isPaused,
+        isMultipartUpload: appStatus.isMultipartUpload
+    };
 }
 
 },{}],8:[function(require,module,exports){
@@ -566,7 +936,7 @@ function configureStore(initialState) {
 Object.defineProperty(exports, "__esModule", {
     value: true
 });
-exports.observeStore = exports.raiseEvent = exports.parseJson = exports.parseNameFromUrl = exports.parseURL = exports.request = exports.getCookie = undefined;
+exports.observeStore = exports.raiseEvent = exports.parseJson = exports.parseNameFromUrl = exports.parseURL = exports.putRequest = exports.request = exports.getCookie = undefined;
 
 var _constants = require('../constants');
 
@@ -601,6 +971,33 @@ var request = exports.request = function request(method, url, data, headers, onP
     }
 
     request.send(data);
+};
+
+/**
+ * PUT request with blob body (for S3 upload part). Returns the XHR so caller can abort.
+ */
+var putRequest = exports.putRequest = function putRequest(url, blob, onProgress, onLoad, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+
+    xhr.onload = function () {
+        onLoad(xhr.status, xhr.responseText, xhr);
+    };
+
+    if (onError) {
+        xhr.onerror = xhr.onabort = function () {
+            onError(xhr.status, xhr.responseText);
+        };
+    }
+
+    if (onProgress) {
+        xhr.upload.onprogress = function (data) {
+            onProgress(data);
+        };
+    }
+
+    xhr.send(blob);
+    return xhr;
 };
 
 var parseURL = exports.parseURL = function parseURL(text) {

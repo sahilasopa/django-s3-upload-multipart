@@ -1,5 +1,5 @@
-import {removeUpload, getUploadURL, clearErrors, updateProgress} from '../actions';
-import {getFilename, getUrl, getError, getUploadProgress} from '../store';
+import {removeUpload, getUploadURL, clearErrors, updateProgress, multipartPaused, multipartResumed, abortMultipartAndRemove} from '../actions';
+import {getFilename, getUrl, getError, getUploadProgress, getMultipartState} from '../store';
 import {observeStore, raiseEvent} from '../utils';
 
 
@@ -58,19 +58,80 @@ const View = function(element, store) {
 
         removeUpload: function(event) {
             event.preventDefault();
-
-            store.dispatch(updateProgress());
-            store.dispatch(removeUpload());
-            raiseEvent(this.$element, 's3upload:clear-upload');
+            var self = this;
+            var policyUrl = this.$element.getAttribute('data-policy-url');
+            function clearUpload() {
+                store.dispatch(updateProgress());
+                store.dispatch(removeUpload());
+                self.$input.value = '';
+                self.$element.classList.add('form-active');
+                self.$element.classList.remove('link-active');
+                raiseEvent(self.$element, 's3upload:clear-upload');
+            }
+            abortMultipartAndRemove(store, policyUrl, clearUpload);
         },
 
         getUploadURL: function(event) {
-            const file = this.$input.files[0],
-                dest = this.$dest.value,
+            const file = this.$input.files[0];
+            if (!file) return;
+            const dest = this.$dest.value,
                 url  = this.$element.getAttribute('data-policy-url');
 
             store.dispatch(clearErrors());
-            store.dispatch(getUploadURL(file, dest, url, store));
+            store.dispatch(getUploadURL(file, dest, url, store, this.xhrRef, this.resumeRef));
+        },
+
+        pauseUpload: function(event) {
+            event.preventDefault();
+            if (this.xhrRef && this.xhrRef.xhr) {
+                this.xhrRef.pausedByUser = true;
+                this.xhrRef.xhr.abort();
+                this.xhrRef.xhr = null;
+            }
+            store.dispatch(multipartPaused());
+        },
+
+        resumeUpload: function(event) {
+            event.preventDefault();
+            store.dispatch(multipartResumed());
+            if (this.resumeRef && typeof this.resumeRef.resume === 'function') {
+                this.resumeRef.resume();
+            }
+        },
+
+        cancelUpload: function(event) {
+            event.preventDefault();
+            if (this.xhrRef && this.xhrRef.xhr) {
+                this.xhrRef.pausedByUser = true;
+                this.xhrRef.xhr.abort();
+                this.xhrRef.xhr = null;
+            }
+            var self = this;
+            var policyUrl = this.$element.getAttribute('data-policy-url');
+            function clearUpload() {
+                store.dispatch(updateProgress());
+                store.dispatch(removeUpload());
+                self.$input.value = '';
+                self.$element.classList.add('form-active');
+                self.$element.classList.remove('link-active');
+                raiseEvent(self.$element, 's3upload:clear-upload');
+            }
+            abortMultipartAndRemove(store, policyUrl, clearUpload);
+        },
+
+        renderMultipartControls: function() {
+            const state = getMultipartState(store);
+            const controls = this.$multipartControls;
+            const pauseBtn = this.$pauseBtn;
+            const resumeBtn = this.$resumeBtn;
+            if (!controls || !pauseBtn || !resumeBtn) return;
+            if (state.isMultipartUpload && store.getState().appStatus.isUploading) {
+                controls.style.display = 'flex';
+                pauseBtn.style.display = state.isPaused ? 'none' : 'inline-flex';
+                resumeBtn.style.display = state.isPaused ? 'inline-flex' : 'none';
+            } else {
+                controls.style.display = 'none';
+            }
         },
 
         init: function() {
@@ -84,6 +145,12 @@ const View = function(element, store) {
             this.$link    = element.querySelector('.s3upload__file-link');
             this.$error   = element.querySelector('.s3upload__error');
             this.$bar     = element.querySelector('.s3upload__bar');
+            this.$multipartControls = element.querySelector('.s3upload__multipart-controls');
+            this.$pauseBtn = element.querySelector('.s3upload__pause');
+            this.$resumeBtn = element.querySelector('.s3upload__resume');
+            this.$cancelBtn = element.querySelector('.s3upload__cancel');
+            this.xhrRef = { xhr: null };
+            this.resumeRef = { resume: null };
 
             // set initial DOM states3upload__
             const status = (this.$url.value === '') ? 'form' : 'link';
@@ -92,16 +159,18 @@ const View = function(element, store) {
             // add event listeners
             this.$remove.addEventListener('click', this.removeUpload.bind(this))
             this.$input.addEventListener('change', this.getUploadURL.bind(this))
+            if (this.$pauseBtn) this.$pauseBtn.addEventListener('click', this.pauseUpload.bind(this));
+            if (this.$resumeBtn) this.$resumeBtn.addEventListener('click', this.resumeUpload.bind(this));
+            if (this.$cancelBtn) this.$cancelBtn.addEventListener('click', this.cancelUpload.bind(this));
 
-            // these three observers subscribe to the store, but only trigger their
-            // callbacks when the specific piece of state they observe changes.
-            // this allows for a less naive approach to rendering changes than a
-            // render method subscribed to the whole state.
+            // these observers subscribe to the store
             const filenameObserver = observeStore(store, state => state.appStatus.filename, this.renderFilename.bind(this));
-
             const errorObserver = observeStore(store, state => state.appStatus.error, this.renderError.bind(this));
-
             const uploadProgressObserver = observeStore(store, state => state.appStatus.uploadProgress, this.renderUploadProgress.bind(this));
+            const multipartObserver = observeStore(store, state =>
+                (state.appStatus.isMultipartUpload && state.appStatus.isUploading) ? (state.appStatus.isPaused ? 'paused' : 'uploading') : 'hidden',
+                this.renderMultipartControls.bind(this)
+            );
         }
     }
 }

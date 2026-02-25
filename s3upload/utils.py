@@ -17,7 +17,7 @@ def create_upload_data(  # noqa: C901
     *,
     content_type: str,
     key: str,
-    acl: str,
+    acl: str | None,
     bucket: str | None = None,
     cache_control: str | None = None,
     content_disposition: str | None = None,
@@ -25,7 +25,7 @@ def create_upload_data(  # noqa: C901
     server_side_encryption: str | None = None,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """Generate AWS upload payload."""
+    """Generate AWS upload payload. Use acl=None for buckets with ACLs disabled."""
     access_key = settings.AWS_ACCESS_KEY_ID
     secret_access_key = settings.AWS_SECRET_ACCESS_KEY
     bucket = bucket or settings.AWS_STORAGE_BUCKET_NAME
@@ -36,18 +36,21 @@ def create_upload_data(  # noqa: C901
     now_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S000Z")
     raw_date = datetime.now(timezone.utc).strftime("%Y%m%d")
 
+    conditions: list[Any] = [
+        {"bucket": bucket},
+        ["starts-with", "$key", ""],
+        {"success_action_status": "201"},
+        {"x-amz-credential": f"{access_key}/{raw_date}/{region}/s3/aws4_request"},
+        {"x-amz-algorithm": "AWS4-HMAC-SHA256"},
+        {"x-amz-date": now_date},
+        {"content-type": content_type},
+    ]
+    if acl is not None:
+        conditions.insert(1, {"acl": acl})
+
     policy_dict: dict[str, Any] = {
         "expiration": expires,
-        "conditions": [
-            {"bucket": bucket},
-            {"acl": acl},
-            ["starts-with", "$key", ""],
-            {"success_action_status": "201"},
-            {"x-amz-credential": f"{access_key}/{raw_date}/{region}/s3/aws4_request"},
-            {"x-amz-algorithm": "AWS4-HMAC-SHA256"},
-            {"x-amz-date": now_date},
-            {"content-type": content_type},
-        ],
+        "conditions": conditions,
     }
 
     if token:
@@ -92,7 +95,7 @@ def create_upload_data(  # noqa: C901
     ).digest()
 
     signature = hmac.new(signing_key, msg=policy, digestmod=hashlib.sha256).hexdigest()
-    return_dict = {
+    return_dict: dict[str, Any] = {
         "policy": policy.decode(),  # decode to make it JSON serializable
         "success_action_status": 201,
         "x-amz-credential": f"{access_key}/{raw_date}/{region}/s3/aws4_request",
@@ -101,9 +104,10 @@ def create_upload_data(  # noqa: C901
         "x-amz-algorithm": "AWS4-HMAC-SHA256",
         "form_action": bucket_url,
         "key": key,
-        "acl": acl,
         "content-type": content_type,
     }
+    if acl is not None:
+        return_dict["acl"] = acl
 
     if token:
         return_dict["x-amz-security-token"] = token
@@ -172,3 +176,104 @@ def get_bucket_endpoint_url(
         default,
     )
     return bucket_endpoint.format(bucket=bucket_name, region=region)
+
+
+# Default chunk size for multipart uploads (6 MB; S3 allows 5 MB - 5 GB per part)
+DEFAULT_MULTIPART_CHUNK_SIZE = 5 * 1024 * 1024
+
+
+def _get_s3_client(endpoint_url: str | None = None):
+    """Return S3 client. Use regional endpoint so presigned URLs use the same host as CORS."""
+    region = settings.S3UPLOAD_REGION
+    if endpoint_url is None and region:
+        endpoint_url = f"https://s3.{region}.amazonaws.com"
+    config = Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual"},
+    )
+    return boto3.client(
+        "s3",
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        config=config,
+        region_name=region,
+        endpoint_url=endpoint_url,
+    )
+
+
+def create_multipart_upload(
+    *,
+    bucket: str | None = None,
+    key: str,
+    content_type: str,
+    acl: str | None = "public-read",
+    server_side_encryption: str | None = None,
+) -> str:
+    """Initiate a multipart upload; returns upload_id. Use acl=None for buckets with ACLs disabled."""
+    bucket = bucket or settings.AWS_STORAGE_BUCKET_NAME
+    s3 = _get_s3_client()
+    params: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": key,
+        "ContentType": content_type,
+    }
+    if acl is not None:
+        params["ACL"] = acl
+    if server_side_encryption:
+        params["ServerSideEncryption"] = server_side_encryption
+    response = s3.create_multipart_upload(**params)
+    return response["UploadId"]
+
+
+def get_upload_part_presigned_url(
+    bucket: str | None = None,
+    key: str = "",
+    upload_id: str = "",
+    part_number: int = 1,
+    expires_in: int = 3600,
+) -> str:
+    """Return a presigned PUT URL for uploading one part."""
+    bucket = bucket or settings.AWS_STORAGE_BUCKET_NAME
+    s3 = _get_s3_client()
+    return s3.generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=expires_in,
+    )
+
+
+def complete_multipart_upload(
+    bucket: str | None = None,
+    key: str = "",
+    upload_id: str = "",
+    parts: list[dict[str, Any]] | None = None,
+) -> None:
+    """Complete a multipart upload. parts: [{"PartNumber": int, "ETag": str}, ...]."""
+    bucket = bucket or settings.AWS_STORAGE_BUCKET_NAME
+    s3 = _get_s3_client()
+    s3.complete_multipart_upload(
+        Bucket=bucket,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": parts or []},
+    )
+
+
+def abort_multipart_upload(
+    bucket: str | None = None,
+    key: str = "",
+    upload_id: str = "",
+) -> None:
+    """Abort a multipart upload."""
+    bucket = bucket or settings.AWS_STORAGE_BUCKET_NAME
+    s3 = _get_s3_client()
+    s3.abort_multipart_upload(
+        Bucket=bucket,
+        Key=key,
+        UploadId=upload_id,
+    )

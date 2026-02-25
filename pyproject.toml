@@ -1,14 +1,14 @@
 [tool.poetry]
-name = "django-s3-upload"
-version = "1.2.0"
-description = "Integrates direct client-side uploading to s3 with Django."
-authors = ["YunoJuno <code@yunojuno.com>"]
+name = "django-s3-upload-multipart"
+version = "1.0.0"
+description = "Direct-to-S3 client-side uploads for Django with multipart support, pause/resume, and file management APIs."
+authors = ["Sahil Asopa <hello@zerobuffer.io>"]
 license = "MIT"
-maintainers = ["YunoJuno <code@yunojuno.com>"]
+maintainers = ["Sahil Asopa <hello@zerobuffer.io>"]
 readme = "README.md"
-homepage = "https://github.com/yunojuno/django-s3-upload"
-repository = "https://github.com/yunojuno/django-s3-upload"
-documentation = "https://github.com/yunojuno/django-s3-upload"
+homepage = "https://github.com/sahilasopa/django-s3-upload-multipart"
+repository = "https://github.com/sahilasopa/django-s3-upload-multipart"
+documentation = "https://github.com/sahilasopa/django-s3-upload-multipart"
 classifiers = [
     "Environment :: Web Environment",
     "Framework :: Django",

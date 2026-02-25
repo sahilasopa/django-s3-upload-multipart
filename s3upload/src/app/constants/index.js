@@ -9,7 +9,15 @@ export default {
     ADD_ERROR: 'ADD_ERROR',
     CLEAR_ERRORS: 'CLEAR_ERRORS',
     UPDATE_PROGRESS: 'UPDATE_PROGRESS',
-    RECEIVE_SIGNED_URL: 'RECEIVE_SIGNED_URL'
+    RECEIVE_SIGNED_URL: 'RECEIVE_SIGNED_URL',
+    INITIATE_MULTIPART: 'INITIATE_MULTIPART',
+    MULTIPART_INITIATED: 'MULTIPART_INITIATED',
+    PART_COMPLETED: 'PART_COMPLETED',
+    MULTIPART_PAUSED: 'MULTIPART_PAUSED',
+    MULTIPART_RESUMED: 'MULTIPART_RESUMED',
+    MULTIPART_COMPLETED: 'MULTIPART_COMPLETED',
+    MULTIPART_ABORTED: 'MULTIPART_ABORTED',
+    MULTIPART_ERROR: 'MULTIPART_ERROR'
 };
 
 let i18n_strings;
@@ -21,7 +29,9 @@ try {
         "no_upload_failed": "Sorry, failed to upload file.",
         "no_upload_url": "Sorry, could not get upload URL.",
         "no_file_too_large": "Sorry, the file is too large to be uploaded.",
-        "no_file_too_small": "Sorry, the file is too small to be uploaded."
+        "no_file_too_small": "Sorry, the file is too small to be uploaded.",
+        "no_multipart_init_failed": "Sorry, could not start multipart upload.",
+        "no_multipart_failed": "Sorry, multipart upload failed."
     };
 }
 
