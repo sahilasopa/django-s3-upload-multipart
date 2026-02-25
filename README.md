@@ -29,7 +29,7 @@ Features include:
 
 Install with Pip:
 
-`pip install django-s3-upload`
+`pip install django-s3-upload-multipart`
 
 ## AWS Setup
 
@@ -242,7 +242,7 @@ Examples of both approaches can be found in the examples folder. To run them:
 
 ```shell
 $ git clone git@github.com:sahilasopa/django-s3-upload-multipart.git
-$ cd django-s3-upload
+$ cd django-s3-upload-multipart
 
 # Add your AWS keys to your environment
 export AWS_ACCESS_KEY_ID='...'
