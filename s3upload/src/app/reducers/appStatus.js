@@ -40,10 +40,17 @@ export default (state = {}, action) => {
             return Object.assign({}, state, {
                 error: null
             });
-        case constants.UPDATE_PROGRESS:
+        case constants.UPDATE_PROGRESS: {
+            const next = typeof action.progress === 'number' ? action.progress : null;
+            if (next === null) {
+                return Object.assign({}, state, { uploadProgress: 0 });
+            }
+            const current = state.uploadProgress || 0;
+            const clamped = Math.min(100, Math.max(0, next));
             return Object.assign({}, state, {
-                uploadProgress: action.progress
+                uploadProgress: Math.max(current, clamped)
             });
+        }
         case constants.RECEIVE_SIGNED_URL: {
             return Object.assign({}, state, {
                 signedURL: action.signedURL

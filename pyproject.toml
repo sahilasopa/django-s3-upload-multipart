@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "django-s3-upload-multipart"
-version = "1.2.0"
+version = "1.4.0"
 description = "Direct-to-S3 client-side uploads for Django with multipart support, pause/resume, and file management APIs."
 authors = ["Sahil Asopa <hello@zerobuffer.io>"]
 license = "MIT"

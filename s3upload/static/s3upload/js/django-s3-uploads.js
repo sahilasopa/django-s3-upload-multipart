@@ -717,10 +717,17 @@ exports.default = function () {
             return Object.assign({}, state, {
                 error: null
             });
-        case _constants2.default.UPDATE_PROGRESS:
+        case _constants2.default.UPDATE_PROGRESS: {
+            var next = typeof action.progress === 'number' ? action.progress : null;
+            if (next === null) {
+                return Object.assign({}, state, { uploadProgress: 0 });
+            }
+            var current = state.uploadProgress || 0;
+            var clamped = Math.min(100, Math.max(0, next));
             return Object.assign({}, state, {
-                uploadProgress: action.progress
+                uploadProgress: Math.max(current, clamped)
             });
+        }
         case _constants2.default.RECEIVE_SIGNED_URL:
             {
                 return Object.assign({}, state, {
