@@ -20,6 +20,7 @@ from .utils import (
 )
 
 SESSION_KEY_MULTIPART = "s3upload_multipart"
+MAX_MULTIPART_SESSION_ENTRIES = 20
 
 
 def _validate_upload_dest(
@@ -177,12 +178,23 @@ def initiate_multipart(request: HttpRequest) -> JsonResponse:
         server_side_encryption=server_side_encryption,
     )
 
-    request.session[SESSION_KEY_MULTIPART] = {
-        "upload_id": upload_id,
+    # Store by upload_id so multiple concurrent uploads (e.g. distribution videos + reels) don't overwrite each other
+    entries = request.session.get(SESSION_KEY_MULTIPART)
+    if isinstance(entries, dict) and "upload_id" in entries:
+        # Migrate old single-entry format to keyed format
+        entries = {entries["upload_id"]: {"key": entries["key"], "bucket": entries["bucket"], "acl": entries["acl"]}}
+    if not isinstance(entries, dict):
+        entries = {}
+    entries[upload_id] = {
         "key": key,
         "bucket": bucket_resolved,
         "acl": acl,
     }
+    if len(entries) > MAX_MULTIPART_SESSION_ENTRIES:
+        for old_id in list(entries.keys())[: len(entries) - MAX_MULTIPART_SESSION_ENTRIES]:
+            del entries[old_id]
+    request.session[SESSION_KEY_MULTIPART] = entries
+    request.session.save()
 
     bucket_endpoint = get_bucket_endpoint_url(bucket_resolved)
 
@@ -201,17 +213,44 @@ def initiate_multipart(request: HttpRequest) -> JsonResponse:
 
 def _get_session_multipart(request: HttpRequest):
     """Return session multipart dict or None; validate upload_id/key match request."""
-    session_data = request.session.get(SESSION_KEY_MULTIPART)
-    if not session_data:
+    raw = request.session.get(SESSION_KEY_MULTIPART)
+    if not raw:
         return None
     upload_id = request.POST.get("upload_id") or request.GET.get("upload_id")
     key = request.POST.get("key") or request.GET.get("key")
+    if upload_id is None or key is None:
+        return None
+    # New format: dict keyed by upload_id
+    if isinstance(raw, dict) and "upload_id" not in raw:
+        entry = raw.get(upload_id)
+        if not entry or str(key).strip() != str(entry.get("key") or "").strip():
+            return None
+        return {
+            "upload_id": upload_id,
+            "key": entry["key"],
+            "bucket": entry["bucket"],
+            "acl": entry.get("acl"),
+        }
+    # Old single-entry format (backward compat)
     if (
-        upload_id != session_data.get("upload_id")
-        or key != session_data.get("key")
+        str(upload_id).strip() != str(raw.get("upload_id") or "").strip()
+        or str(key).strip() != str(raw.get("key") or "").strip()
     ):
         return None
-    return session_data
+    return raw
+
+
+def _remove_session_multipart_entry(request: HttpRequest, upload_id: str) -> None:
+    """Remove one upload_id from session multipart dict."""
+    raw = request.session.get(SESSION_KEY_MULTIPART)
+    if isinstance(raw, dict) and "upload_id" not in raw:
+        entries = {k: v for k, v in raw.items() if k != upload_id}
+        if not entries:
+            del request.session[SESSION_KEY_MULTIPART]
+        else:
+            request.session[SESSION_KEY_MULTIPART] = entries
+    elif isinstance(raw, dict) and raw.get("upload_id") == upload_id:
+        del request.session[SESSION_KEY_MULTIPART]
 
 
 @require_POST
@@ -298,9 +337,8 @@ def complete_multipart_view(request: HttpRequest) -> JsonResponse:
             {"error": "Failed to complete upload: %s" % str(e)}, status=500
         )
 
-    # Clear session
-    if SESSION_KEY_MULTIPART in request.session:
-        del request.session[SESSION_KEY_MULTIPART]
+    # Remove this upload from session (keep other concurrent uploads)
+    _remove_session_multipart_entry(request, session_data["upload_id"])
 
     key = session_data["key"]
     bucket = session_data["bucket"]
@@ -335,6 +373,5 @@ def abort_multipart_view(request: HttpRequest) -> JsonResponse:
         )
     except Exception:
         pass
-    if SESSION_KEY_MULTIPART in request.session:
-        del request.session[SESSION_KEY_MULTIPART]
+    _remove_session_multipart_entry(request, session_data["upload_id"])
     return JsonResponse({}, content_type="application/json")

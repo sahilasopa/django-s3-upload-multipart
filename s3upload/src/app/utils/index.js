@@ -9,6 +9,7 @@ export const getCookie = function(name) {
 export const request = function(method, url, data, headers, onProgress, onLoad, onError) {
     var request = new XMLHttpRequest();
     request.open(method, url, true);
+    request.withCredentials = true;
 
     Object.keys(headers).forEach(function(key){
         request.setRequestHeader(key, headers[key]);
