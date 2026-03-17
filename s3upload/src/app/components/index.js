@@ -74,6 +74,9 @@ const View = function(element, store) {
         getUploadURL: function(event) {
             const file = this.$input.files[0];
             if (!file) return;
+            // Prevent double-start: if a multipart upload is already in progress, ignore
+            const state = store.getState().appStatus;
+            if (state.isUploading && state.isMultipartUpload) return;
             const dest = this.$dest.value,
                 url  = this.$element.getAttribute('data-policy-url');
 
@@ -171,6 +174,10 @@ const View = function(element, store) {
                 (state.appStatus.isMultipartUpload && state.appStatus.isUploading) ? (state.appStatus.isPaused ? 'paused' : 'uploading') : 'hidden',
                 this.renderMultipartControls.bind(this)
             );
+            // Disable file input while multipart upload is in progress to prevent double trigger
+            observeStore(store, state => state.appStatus.isUploading && state.appStatus.isMultipartUpload, (isUploading) => {
+                if (this.$input) this.$input.disabled = !!isUploading;
+            });
         }
     }
 }

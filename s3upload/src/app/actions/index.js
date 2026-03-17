@@ -12,6 +12,11 @@ function getMultipartBaseUrl(policyUrl) {
 export const getUploadURL = (file, dest, url, store, xhrRef, resumeRef) => {
 
     if (file.size > MULTIPART_CHUNK_SIZE) {
+        // Prevent duplicate initiate (e.g. double change event): only one multipart flow at a time
+        const state = store.getState().appStatus;
+        if (state.isUploading && state.isMultipartUpload) {
+            return { type: constants.INITIATE_MULTIPART };
+        }
         store.dispatch(initiateMultipart(file, dest, url, store, xhrRef, resumeRef));
         return { type: constants.INITIATE_MULTIPART };
     }
@@ -123,15 +128,21 @@ function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
         form.append('part_number', String(partNumber));
 
         request('POST', presignUrl, form, headers, false, function(status, json) {
+            var data = parseJson(json);
             if (status !== 200) {
-                store.dispatch(addError(i18n_strings.no_multipart_failed));
+                var errMsg = data && data.error ? data.error : i18n_strings.no_multipart_failed;
+                if (status === 403 && data && data.error) {
+                    console.error('s3upload presign_part_url failed:', status, data.error);
+                } else if (status !== 200) {
+                    console.error('s3upload presign_part_url failed:', status, json);
+                }
+                store.dispatch(addError(errMsg));
                 store.dispatch(multipartError());
                 return;
             }
-            var data = parseJson(json);
             var putUrl = data && data.url;
             if (!putUrl) {
-                store.dispatch(addError(i18n_strings.no_multipart_failed));
+                store.dispatch(addError(data && data.error ? data.error : i18n_strings.no_multipart_failed));
                 store.dispatch(multipartError());
                 return;
             }
@@ -154,7 +165,15 @@ function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
                 function(statusCode, responseText, xhrObj) {
                     if (xhrRef) xhrRef.xhr = null;
                     if (statusCode !== 200) {
-                        store.dispatch(addError(i18n_strings.no_multipart_failed));
+                        var errMsg = i18n_strings.no_multipart_failed;
+                        if (responseText && responseText.length < 500) {
+                            errMsg = responseText;
+                        } else if (responseText && responseText.indexOf('<Error>') !== -1) {
+                            var msgMatch = responseText.match(/<Message>(.*?)<\/Message>/);
+                            errMsg = msgMatch ? msgMatch[1] : responseText.substring(0, 200);
+                        }
+                        console.error('s3upload PUT to S3 failed:', statusCode, responseText ? responseText.substring(0, 500) : '(no body)');
+                        store.dispatch(addError(errMsg));
                         store.dispatch(multipartError());
                         return;
                     }
@@ -176,13 +195,22 @@ function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
                         }
                     }
                     if (store.getState().appStatus.isPaused) return;
-                    store.dispatch(addError(i18n_strings.no_multipart_failed));
+                    var errMsg = i18n_strings.no_multipart_failed;
+                    if (responseText && responseText.length < 500) {
+                        errMsg = responseText;
+                    } else if (responseText && responseText.indexOf('<Error>') !== -1) {
+                        var msgMatch = responseText.match(/<Message>(.*?)<\/Message>/);
+                        errMsg = msgMatch ? msgMatch[1] : (responseText.substring(0, 200) || errMsg);
+                    }
+                    console.error('s3upload PUT error/abort:', statusCode, responseText ? responseText.substring(0, 500) : '(network error or timeout)');
+                    store.dispatch(addError(errMsg));
                     store.dispatch(multipartError());
                 }
             );
             if (xhrRef) xhrRef.xhr = xhr;
         }, function(status, json) {
-            store.dispatch(addError(i18n_strings.no_multipart_failed));
+            var data = parseJson(json);
+            store.dispatch(addError(data && data.error ? data.error : i18n_strings.no_multipart_failed));
             store.dispatch(multipartError());
         });
     }
@@ -211,15 +239,15 @@ function sendComplete(store, completeUrl, headers, filename) {
     form.append('parts', JSON.stringify(parts));
 
     request('POST', completeUrl, form, headers, false, function(status, json) {
+        var data = parseJson(json);
         if (status !== 200) {
-            store.dispatch(addError(i18n_strings.no_multipart_failed));
+            store.dispatch(addError(data && data.error ? data.error : i18n_strings.no_multipart_failed));
             store.dispatch(multipartError());
             return;
         }
-        var data = parseJson(json);
         var url = data && (data.private_access_url || data.url);
         if (!url) {
-            store.dispatch(addError(i18n_strings.no_multipart_failed));
+            store.dispatch(addError(data && data.error ? data.error : i18n_strings.no_multipart_failed));
             store.dispatch(multipartError());
             return;
         }
@@ -227,7 +255,8 @@ function sendComplete(store, completeUrl, headers, filename) {
         store.dispatch(completeUploadToAWS(filename, url));
         raiseEvent(getElement(store), 's3upload:file-uploaded', { filename: filename, url: url });
     }, function(status, json) {
-        store.dispatch(addError(i18n_strings.no_multipart_failed));
+        var data = parseJson(json);
+        store.dispatch(addError(data && data.error ? data.error : i18n_strings.no_multipart_failed));
         store.dispatch(multipartError());
     });
 }

@@ -26,6 +26,11 @@ function getMultipartBaseUrl(policyUrl) {
 var getUploadURL = exports.getUploadURL = function getUploadURL(file, dest, url, store, xhrRef, resumeRef) {
 
     if (file.size > MULTIPART_CHUNK_SIZE) {
+        // Prevent duplicate initiate (e.g. double change event): only one multipart flow at a time
+        var state = store.getState().appStatus;
+        if (state.isUploading && state.isMultipartUpload) {
+            return { type: _constants2.default.INITIATE_MULTIPART };
+        }
         store.dispatch(initiateMultipart(file, dest, url, store, xhrRef, resumeRef));
         return { type: _constants2.default.INITIATE_MULTIPART };
     }
@@ -139,15 +144,21 @@ function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
         form.append('part_number', String(partNumber));
 
         (0, _utils.request)('POST', presignUrl, form, headers, false, function (status, json) {
+            var data = (0, _utils.parseJson)(json);
             if (status !== 200) {
-                store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                var errMsg = data && data.error ? data.error : _constants.i18n_strings.no_multipart_failed;
+                if (status === 403 && data && data.error) {
+                    console.error('s3upload presign_part_url failed:', status, data.error);
+                } else if (status !== 200) {
+                    console.error('s3upload presign_part_url failed:', status, json);
+                }
+                store.dispatch(addError(errMsg));
                 store.dispatch(multipartError());
                 return;
             }
-            var data = (0, _utils.parseJson)(json);
             var putUrl = data && data.url;
             if (!putUrl) {
-                store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                store.dispatch(addError(data && data.error ? data.error : _constants.i18n_strings.no_multipart_failed));
                 store.dispatch(multipartError());
                 return;
             }
@@ -168,7 +179,15 @@ function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
             }, function (statusCode, responseText, xhrObj) {
                 if (xhrRef) xhrRef.xhr = null;
                 if (statusCode !== 200) {
-                    store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                    var errMsg = _constants.i18n_strings.no_multipart_failed;
+                    if (responseText && responseText.length < 500) {
+                        errMsg = responseText;
+                    } else if (responseText && responseText.indexOf('<Error>') !== -1) {
+                        var msgMatch = responseText.match(/<Message>(.*?)<\/Message>/);
+                        errMsg = msgMatch ? msgMatch[1] : responseText.substring(0, 200);
+                    }
+                    console.error('s3upload PUT to S3 failed:', statusCode, responseText ? responseText.substring(0, 500) : '(no body)');
+                    store.dispatch(addError(errMsg));
                     store.dispatch(multipartError());
                     return;
                 }
@@ -189,12 +208,21 @@ function runMultipartPartLoop(file, store, baseUrl, xhrRef, resumeRef) {
                     }
                 }
                 if (store.getState().appStatus.isPaused) return;
-                store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+                var errMsg = _constants.i18n_strings.no_multipart_failed;
+                if (responseText && responseText.length < 500) {
+                    errMsg = responseText;
+                } else if (responseText && responseText.indexOf('<Error>') !== -1) {
+                    var msgMatch = responseText.match(/<Message>(.*?)<\/Message>/);
+                    errMsg = msgMatch ? msgMatch[1] : responseText.substring(0, 200) || errMsg;
+                }
+                console.error('s3upload PUT error/abort:', statusCode, responseText ? responseText.substring(0, 500) : '(network error or timeout)');
+                store.dispatch(addError(errMsg));
                 store.dispatch(multipartError());
             });
             if (xhrRef) xhrRef.xhr = xhr;
         }, function (status, json) {
-            store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+            var data = (0, _utils.parseJson)(json);
+            store.dispatch(addError(data && data.error ? data.error : _constants.i18n_strings.no_multipart_failed));
             store.dispatch(multipartError());
         });
     }
@@ -225,15 +253,15 @@ function sendComplete(store, completeUrl, headers, filename) {
     form.append('parts', JSON.stringify(parts));
 
     (0, _utils.request)('POST', completeUrl, form, headers, false, function (status, json) {
+        var data = (0, _utils.parseJson)(json);
         if (status !== 200) {
-            store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+            store.dispatch(addError(data && data.error ? data.error : _constants.i18n_strings.no_multipart_failed));
             store.dispatch(multipartError());
             return;
         }
-        var data = (0, _utils.parseJson)(json);
         var url = data && (data.private_access_url || data.url);
         if (!url) {
-            store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+            store.dispatch(addError(data && data.error ? data.error : _constants.i18n_strings.no_multipart_failed));
             store.dispatch(multipartError());
             return;
         }
@@ -241,7 +269,8 @@ function sendComplete(store, completeUrl, headers, filename) {
         store.dispatch(completeUploadToAWS(filename, url));
         (0, _utils.raiseEvent)((0, _store.getElement)(store), 's3upload:file-uploaded', { filename: filename, url: url });
     }, function (status, json) {
-        store.dispatch(addError(_constants.i18n_strings.no_multipart_failed));
+        var data = (0, _utils.parseJson)(json);
+        store.dispatch(addError(data && data.error ? data.error : _constants.i18n_strings.no_multipart_failed));
         store.dispatch(multipartError());
     });
 }
@@ -505,6 +534,9 @@ var View = function View(element, store) {
         getUploadURL: function getUploadURL(event) {
             var file = this.$input.files[0];
             if (!file) return;
+            // Prevent double-start: if a multipart upload is already in progress, ignore
+            var state = store.getState().appStatus;
+            if (state.isUploading && state.isMultipartUpload) return;
             var dest = this.$dest.value,
                 url = this.$element.getAttribute('data-policy-url');
 
@@ -566,6 +598,8 @@ var View = function View(element, store) {
         },
 
         init: function init() {
+            var _this = this;
+
             // cache all the query selectors
             // $variables represent DOM elements
             this.$element = element;
@@ -607,6 +641,12 @@ var View = function View(element, store) {
             var multipartObserver = (0, _utils.observeStore)(store, function (state) {
                 return state.appStatus.isMultipartUpload && state.appStatus.isUploading ? state.appStatus.isPaused ? 'paused' : 'uploading' : 'hidden';
             }, this.renderMultipartControls.bind(this));
+            // Disable file input while multipart upload is in progress to prevent double trigger
+            (0, _utils.observeStore)(store, function (state) {
+                return state.appStatus.isUploading && state.appStatus.isMultipartUpload;
+            }, function (isUploading) {
+                if (_this.$input) _this.$input.disabled = !!isUploading;
+            });
         }
     };
 };
@@ -717,17 +757,18 @@ exports.default = function () {
             return Object.assign({}, state, {
                 error: null
             });
-        case _constants2.default.UPDATE_PROGRESS: {
-            var next = typeof action.progress === 'number' ? action.progress : null;
-            if (next === null) {
-                return Object.assign({}, state, { uploadProgress: 0 });
+        case _constants2.default.UPDATE_PROGRESS:
+            {
+                var next = typeof action.progress === 'number' ? action.progress : null;
+                if (next === null) {
+                    return Object.assign({}, state, { uploadProgress: 0 });
+                }
+                var current = state.uploadProgress || 0;
+                var clamped = Math.min(100, Math.max(0, next));
+                return Object.assign({}, state, {
+                    uploadProgress: Math.max(current, clamped)
+                });
             }
-            var current = state.uploadProgress || 0;
-            var clamped = Math.min(100, Math.max(0, next));
-            return Object.assign({}, state, {
-                uploadProgress: Math.max(current, clamped)
-            });
-        }
         case _constants2.default.RECEIVE_SIGNED_URL:
             {
                 return Object.assign({}, state, {
@@ -956,6 +997,7 @@ var getCookie = exports.getCookie = function getCookie(name) {
 var request = exports.request = function request(method, url, data, headers, onProgress, onLoad, onError) {
     var request = new XMLHttpRequest();
     request.open(method, url, true);
+    request.withCredentials = true;
 
     Object.keys(headers).forEach(function (key) {
         request.setRequestHeader(key, headers[key]);
@@ -1068,6 +1110,9 @@ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { de
 
 // by default initHandler inits on '.s3upload', but if passed a custom
 // selector in the event data, it will init on that instead.
+// Skip elements already initialized (avoids double-init when script is loaded twice).
+var S3UPLOAD_INIT_ATTR = 'data-s3upload-initialized';
+
 function initHandler(event) {
     var selector = '.s3upload';
 
@@ -1079,11 +1124,12 @@ function initHandler(event) {
 
     // safari doesn't like forEach on nodeList objects
     for (var i = 0; i < elements.length; i++) {
-        // initialise instance for each element
         var element = elements[i];
+        if (element.getAttribute(S3UPLOAD_INIT_ATTR) === 'true') continue;
         var store = (0, _store2.default)({ element: element });
         var view = new _components.View(element, store);
         view.init();
+        element.setAttribute(S3UPLOAD_INIT_ATTR, 'true');
     }
 }
 

@@ -230,7 +230,7 @@ def get_upload_part_presigned_url(
     key: str = "",
     upload_id: str = "",
     part_number: int = 1,
-    expires_in: int = 3600,
+    expires_in: int = 7200,
 ) -> str:
     """Return a presigned PUT URL for uploading one part."""
     bucket = bucket or settings.AWS_STORAGE_BUCKET_NAME

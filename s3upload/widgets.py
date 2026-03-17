@@ -20,7 +20,7 @@ from .utils import (
 
 class S3UploadWidget(widgets.TextInput):
     class Media:
-        js = ("s3upload/js/django-s3-uploads.min.js",)
+        js = ("s3upload/js/django-s3-uploads.js",)
         css = {
             "all": (
                 "s3upload/css/bootstrap-progress.min.css",

@@ -261,6 +261,7 @@ def presign_part_url(request: HttpRequest) -> JsonResponse:
         return JsonResponse(
             {"error": "Invalid or expired multipart session."}, status=403
         )
+    request.session.modified = True
     try:
         part_number = int(request.POST.get("part_number", 0))
     except (TypeError, ValueError):
@@ -273,7 +274,7 @@ def presign_part_url(request: HttpRequest) -> JsonResponse:
         key=session_data["key"],
         upload_id=session_data["upload_id"],
         part_number=part_number,
-        expires_in=3600,
+        expires_in=7200,
     )
     return JsonResponse({"url": url}, content_type="application/json")
 
