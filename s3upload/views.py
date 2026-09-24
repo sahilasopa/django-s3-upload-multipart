@@ -4,6 +4,7 @@ from os.path import splitext
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import caches
 from django.http import HttpRequest, JsonResponse
 from django.utils.text import get_valid_filename
 from django.views.decorators.http import require_POST
@@ -19,8 +20,10 @@ from .utils import (
     get_upload_part_presigned_url,
 )
 
-SESSION_KEY_MULTIPART = "s3upload_multipart"
-MAX_MULTIPART_SESSION_ENTRIES = 20
+MULTIPART_CACHE_KEY_PREFIX = "s3upload:multipart:"
+# Refreshed on every part request, so this only bounds idle time.
+DEFAULT_MULTIPART_TTL = 24 * 60 * 60
+INVALID_MULTIPART_SESSION = {"error": "Invalid or expired multipart session."}
 
 
 def _validate_upload_dest(
@@ -142,7 +145,7 @@ def get_upload_params(request: HttpRequest) -> JsonResponse:  # noqa: C901
 
 @require_POST
 def initiate_multipart(request: HttpRequest) -> JsonResponse:
-    """Initiate multipart upload; store upload_id/key/bucket in session."""
+    """Initiate multipart upload; remember upload_id/key/bucket in the cache."""
     content_type = request.POST.get("type", "")
     filename = get_valid_filename(request.POST.get("name", ""))
     dest_name = request.POST.get("dest", "")
@@ -178,23 +181,16 @@ def initiate_multipart(request: HttpRequest) -> JsonResponse:
         server_side_encryption=server_side_encryption,
     )
 
-    # Store by upload_id so multiple concurrent uploads (e.g. distribution videos + reels) don't overwrite each other
-    entries = request.session.get(SESSION_KEY_MULTIPART)
-    if isinstance(entries, dict) and "upload_id" in entries:
-        # Migrate old single-entry format to keyed format
-        entries = {entries["upload_id"]: {"key": entries["key"], "bucket": entries["bucket"], "acl": entries["acl"]}}
-    if not isinstance(entries, dict):
-        entries = {}
-    entries[upload_id] = {
-        "key": key,
-        "bucket": bucket_resolved,
-        "acl": acl,
-    }
-    if len(entries) > MAX_MULTIPART_SESSION_ENTRIES:
-        for old_id in list(entries.keys())[: len(entries) - MAX_MULTIPART_SESSION_ENTRIES]:
-            del entries[old_id]
-    request.session[SESSION_KEY_MULTIPART] = entries
-    request.session.save()
+    _multipart_cache().set(
+        _multipart_cache_key(upload_id),
+        {
+            "key": key,
+            "bucket": bucket_resolved,
+            "acl": acl,
+            "owner": _multipart_owner(request),
+        },
+        _multipart_ttl(),
+    )
 
     bucket_endpoint = get_bucket_endpoint_url(bucket_resolved)
 
@@ -211,57 +207,64 @@ def initiate_multipart(request: HttpRequest) -> JsonResponse:
     )
 
 
-def _get_session_multipart(request: HttpRequest):
-    """Return session multipart dict or None; validate upload_id/key match request."""
-    raw = request.session.get(SESSION_KEY_MULTIPART)
-    if not raw:
+def _multipart_cache():
+    return caches[getattr(settings, "S3UPLOAD_MULTIPART_CACHE", "default")]
+
+
+def _multipart_ttl() -> int:
+    return getattr(settings, "S3UPLOAD_MULTIPART_TTL", DEFAULT_MULTIPART_TTL)
+
+
+def _multipart_cache_key(upload_id: str) -> str:
+    return MULTIPART_CACHE_KEY_PREFIX + upload_id
+
+
+def _multipart_owner(request: HttpRequest) -> str:
+    """Identify who started an upload: the user, or the browser session if anonymous."""
+    if request.user.is_authenticated:
+        return "user:%s" % request.user.pk
+    if not request.session.session_key:
+        request.session.save()
+    return "session:%s" % request.session.session_key
+
+
+def _get_multipart(request: HttpRequest):
+    """
+    Return the upload named by upload_id/key, if the caller started it.
+
+    None if it is unknown, expired, or was started by someone else.
+
+    Each upload has its own cache entry. Keeping them together in the session
+    lost uploads when many ran at once: concurrent requests overwrote each
+    other's copy of the session.
+    """
+    upload_id = (request.POST.get("upload_id") or "").strip()
+    key = (request.POST.get("key") or "").strip()
+    if not upload_id or not key:
         return None
-    upload_id = request.POST.get("upload_id") or request.GET.get("upload_id")
-    key = request.POST.get("key") or request.GET.get("key")
-    if upload_id is None or key is None:
-        return None
-    # New format: dict keyed by upload_id
-    if isinstance(raw, dict) and "upload_id" not in raw:
-        entry = raw.get(upload_id)
-        if not entry or str(key).strip() != str(entry.get("key") or "").strip():
-            return None
-        return {
-            "upload_id": upload_id,
-            "key": entry["key"],
-            "bucket": entry["bucket"],
-            "acl": entry.get("acl"),
-        }
-    # Old single-entry format (backward compat)
+    entry = _multipart_cache().get(_multipart_cache_key(upload_id))
     if (
-        str(upload_id).strip() != str(raw.get("upload_id") or "").strip()
-        or str(key).strip() != str(raw.get("key") or "").strip()
+        not entry
+        or str(entry.get("key") or "").strip() != key
+        or entry.get("owner") != _multipart_owner(request)
     ):
         return None
-    return raw
+    return {**entry, "upload_id": upload_id}
 
 
-def _remove_session_multipart_entry(request: HttpRequest, upload_id: str) -> None:
-    """Remove one upload_id from session multipart dict."""
-    raw = request.session.get(SESSION_KEY_MULTIPART)
-    if isinstance(raw, dict) and "upload_id" not in raw:
-        entries = {k: v for k, v in raw.items() if k != upload_id}
-        if not entries:
-            del request.session[SESSION_KEY_MULTIPART]
-        else:
-            request.session[SESSION_KEY_MULTIPART] = entries
-    elif isinstance(raw, dict) and raw.get("upload_id") == upload_id:
-        del request.session[SESSION_KEY_MULTIPART]
+def _forget_multipart(upload_id: str) -> None:
+    _multipart_cache().delete(_multipart_cache_key(upload_id))
 
 
 @require_POST
 def presign_part_url(request: HttpRequest) -> JsonResponse:
     """Return presigned PUT URL for one part."""
-    session_data = _get_session_multipart(request)
+    session_data = _get_multipart(request)
     if not session_data:
-        return JsonResponse(
-            {"error": "Invalid or expired multipart session."}, status=403
-        )
-    request.session.modified = True
+        return JsonResponse(INVALID_MULTIPART_SESSION, status=403)
+    _multipart_cache().touch(
+        _multipart_cache_key(session_data["upload_id"]), _multipart_ttl()
+    )
     try:
         part_number = int(request.POST.get("part_number", 0))
     except (TypeError, ValueError):
@@ -282,11 +285,9 @@ def presign_part_url(request: HttpRequest) -> JsonResponse:
 @require_POST
 def complete_multipart_view(request: HttpRequest) -> JsonResponse:
     """Complete multipart upload; return final object URL."""
-    session_data = _get_session_multipart(request)
+    session_data = _get_multipart(request)
     if not session_data:
-        return JsonResponse(
-            {"error": "Invalid or expired multipart session."}, status=403
-        )
+        return JsonResponse(INVALID_MULTIPART_SESSION, status=403)
 
     import json as json_module
 
@@ -338,8 +339,7 @@ def complete_multipart_view(request: HttpRequest) -> JsonResponse:
             {"error": "Failed to complete upload: %s" % str(e)}, status=500
         )
 
-    # Remove this upload from session (keep other concurrent uploads)
-    _remove_session_multipart_entry(request, session_data["upload_id"])
+    _forget_multipart(session_data["upload_id"])
 
     key = session_data["key"]
     bucket = session_data["bucket"]
@@ -360,12 +360,10 @@ def complete_multipart_view(request: HttpRequest) -> JsonResponse:
 
 @require_POST
 def abort_multipart_view(request: HttpRequest) -> JsonResponse:
-    """Abort multipart upload and clear session."""
-    session_data = _get_session_multipart(request)
+    """Abort multipart upload and forget it."""
+    session_data = _get_multipart(request)
     if not session_data:
-        return JsonResponse(
-            {"error": "Invalid or expired multipart session."}, status=403
-        )
+        return JsonResponse(INVALID_MULTIPART_SESSION, status=403)
     try:
         abort_multipart_upload(
             bucket=session_data["bucket"],
@@ -374,5 +372,5 @@ def abort_multipart_view(request: HttpRequest) -> JsonResponse:
         )
     except Exception:
         pass
-    _remove_session_multipart_entry(request, session_data["upload_id"])
+    _forget_multipart(session_data["upload_id"])
     return JsonResponse({}, content_type="application/json")

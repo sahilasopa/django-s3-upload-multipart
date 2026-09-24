@@ -170,6 +170,7 @@ For files larger than the chunk size (default **5 MB**), the widget uses S3’s 
 - **Pause / Resume:** During a multipart upload, the widget shows Pause and Resume. Pausing stops sending new parts; resuming continues from the next part. State is in-memory only (resume is lost on page refresh).
 - **CORS:** Your S3 bucket CORS must allow `PUT` (see AWS Setup above) so the browser can upload parts directly to S3.
 - **URLs:** Include `s3upload.urls` as usual; multipart uses the same destination and auth as `get_upload_params` (initiate, sign part, complete, and abort are under the same path prefix).
+- **Cache:** Each in-progress upload is tracked in Django's cache (one entry per upload, tied to the user who started it, or to their session if anonymous), so any number of files can upload at once. With several server processes, the cache must be shared between them (e.g. Redis or Memcached, not the default `LocMemCache`). `S3UPLOAD_MULTIPART_CACHE` picks the cache alias (default `"default"`) and `S3UPLOAD_MULTIPART_TTL` sets how long an idle upload stays valid, in seconds (default 24 hours, refreshed on every part).
 
 No extra configuration is required for multipart; the same destinations and permissions apply. To disable multipart and always use presigned POST, set `S3UPLOAD_MULTIPART_CHUNK_SIZE` to a value larger than your maximum file size.
 
